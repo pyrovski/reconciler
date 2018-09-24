@@ -3,6 +3,7 @@ package main
 import (
 	"bufio"
 	"database/sql"
+	"encoding/hex"
 	"flag"
 	"log"
 	"os"
@@ -12,6 +13,7 @@ import (
 	"time"
 
 	_ "github.com/mattn/go-sqlite3"
+	"github.com/swatkat/gotrntmetainfoparser"
 	"github.com/tubbebubbe/transmission"
 )
 
@@ -36,8 +38,17 @@ type torFile struct {
 }
 
 type matchedFile struct {
-	tor  string
-	path string
+	tor      string
+	infoHash string
+	path     string
+}
+
+// TODO: if we're going to the trouble of parsing the torrent files anyway,
+// we might as well extract the file list directly instead of reading from a separate file.
+func extractHash(filename string) string {
+	m := gotrntmetainfoparser.MetaInfo{}
+	m.ReadTorrentMetaInfoFile(filename)
+	return hex.EncodeToString([]byte(m.InfoHash))
 }
 
 func matchDBFiles(db *sql.DB, i chan *torFile, o chan *matchedFile, wg *sync.WaitGroup) {
@@ -80,6 +91,7 @@ func matchDBFiles(db *sql.DB, i chan *torFile, o chan *matchedFile, wg *sync.Wai
 				matches[tf.tor] = path
 				o <- &matchedFile{
 					tf.tor,
+					extractHash(tf.tor),
 					path,
 				}
 			}
@@ -125,17 +137,26 @@ func addTorrents(m chan *matchedFile, wg *sync.WaitGroup) {
 
 	cl := transmission.New(url, username, password)
 	// TODO: error reporting here is not great; it misses JSON errors from the server.
-	torrents, err := cl.GetTorrents()
+	torrents, _ := cl.GetTorrents()
+	// skip already added torrents
+	hashes := make(map[string]bool)
+	for _, t := range torrents {
+		hashes[t.HashString] = true
+	}
+
 	// TODO: parse auth errors. May need help from the transmission library
-	log.Print(torrents, err)
 	for match := range m {
+		if _, ok := hashes[match.infoHash]; ok {
+			// this torrent is already known in the BitTorrent client
+			continue
+		}
 		c, err := transmission.NewAddCmdByFile(match.tor)
 		if err != nil {
 			log.Print(err)
 			continue
 		}
 		c.SetDownloadDir(match.path)
-		ta, err := cl.ExecuteAddCommand(c)
+		_, err = cl.ExecuteAddCommand(c)
 		// TODO: error reporting here is not great; it misses JSON errors from the server
 		if err != nil {
 			log.Print(err, c)
