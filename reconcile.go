@@ -189,14 +189,17 @@ func main() {
 		log.Fatal(err)
 	}
 	defer db.Close()
-	wg := &sync.WaitGroup{}
-	wg.Add(2)
+	pg := &sync.WaitGroup{}
+	cg := &sync.WaitGroup{}
 	c := make(chan *torFile)
 	m := make(chan *matchedFile)
-	go matchDBFiles(db, c, m, wg)
-	go addTorrents(m, wg)
+	pg.Add(1)
+	go matchDBFiles(db, c, m, pg)
+	cg.Add(1)
+	go addTorrents(m, cg)
 	scanFiles(db, c, args)
-	wg.Wait()
 	close(c)
+	pg.Wait()
 	close(m)
+	cg.Wait()
 }
