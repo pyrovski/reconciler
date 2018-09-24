@@ -159,7 +159,7 @@ func addTorrents(m chan *matchedFile, wg *sync.WaitGroup) {
 		_, err = cl.ExecuteAddCommand(c)
 		// TODO: error reporting here is not great; it misses JSON errors from the server
 		if err != nil {
-			log.Print(err, c)
+			log.Print(err)
 			continue
 		}
 		// log.Printf("added %v", ta)
