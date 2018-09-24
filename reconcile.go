@@ -12,6 +12,7 @@ import (
 	"time"
 
 	_ "github.com/mattn/go-sqlite3"
+	"github.com/tubbebubbe/transmission"
 )
 
 var dbFile string
@@ -19,10 +20,14 @@ var dbTimeout time.Duration
 
 // Exclude matched paths from the DB matching this regex
 var exclude string
+var server string // includes port
+var username string
+var password string
+var ssl bool
 
 // File format: torrent filename <tab> contained filename
 
-// TODO: match file from query against path/file from DB; the query file may contain directory elements.
+// TODO: first restrict by basename; this should have an index.
 const LookupQuery = "select path || '/' || file from files where path || '/' || file like ?"
 
 type torFile struct {
@@ -73,6 +78,10 @@ func matchDBFiles(db *sql.DB, i chan *torFile, o chan *matchedFile, wg *sync.Wai
 				path := strings.TrimSuffix(fullpath, tf.file)
 				log.Printf("match: %q", path)
 				matches[tf.tor] = path
+				o <- &matchedFile{
+					tf.tor,
+					path,
+				}
 			}
 		}
 		if err := rows.Err(); err != nil {
@@ -95,7 +104,6 @@ func scanFiles(db *sql.DB, c chan *torFile, args []string) {
 			}
 			tor := strings.TrimSpace(ts[0])
 			tf := strings.TrimSpace(ts[1])
-			//log.Printf("%q: %q", tor, tf)
 			torf := &torFile{
 				tor:  tor,
 				file: tf,
@@ -106,10 +114,45 @@ func scanFiles(db *sql.DB, c chan *torFile, args []string) {
 
 }
 
+func addTorrents(m chan *matchedFile, wg *sync.WaitGroup) {
+	defer wg.Done()
+	var url string
+	if ssl {
+		url = "https://" + server
+	} else {
+		url = "http://" + server
+	}
+
+	cl := transmission.New(url, username, password)
+	// TODO: error reporting here is not great; it misses JSON errors from the server.
+	torrents, err := cl.GetTorrents()
+	// TODO: parse auth errors. May need help from the transmission library
+	log.Print(torrents, err)
+	for match := range m {
+		c, err := transmission.NewAddCmdByFile(match.tor)
+		if err != nil {
+			log.Print(err)
+			continue
+		}
+		c.SetDownloadDir(match.path)
+		ta, err := cl.ExecuteAddCommand(c)
+		// TODO: error reporting here is not great; it misses JSON errors from the server
+		if err != nil {
+			log.Print(err, c)
+			continue
+		}
+		// log.Printf("added %v", ta)
+	}
+}
+
 func main() {
 	flag.StringVar(&dbFile, "db", "", "sqlite3 DB file")
 	flag.DurationVar(&dbTimeout, "dbtimeout", time.Duration(30), "timeout for DB operations")
 	flag.StringVar(&exclude, "exclude", "", "regex for excluding matched paths from the DB")
+	flag.StringVar(&server, "server", "localhost:9091", "server URL")
+	flag.StringVar(&username, "u", "transmission", "username")
+	flag.StringVar(&password, "p", "", "password")
+	flag.BoolVar(&ssl, "ssl", false, "use SSL in server connections")
 	flag.Parse()
 	args := flag.Args()
 	if len(args) < 1 {
@@ -126,10 +169,11 @@ func main() {
 	}
 	defer db.Close()
 	wg := &sync.WaitGroup{}
-	wg.Add(1)
+	wg.Add(2)
 	c := make(chan *torFile)
 	m := make(chan *matchedFile)
 	go matchDBFiles(db, c, m, wg)
+	go addTorrents(m, wg)
 	scanFiles(db, c, args)
 	wg.Wait()
 	close(c)
